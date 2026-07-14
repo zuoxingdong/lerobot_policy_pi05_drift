@@ -1,0 +1,30 @@
+# NOTE (load-bearing): keep the underscored project name AND the hatchling backend.
+# LeRobot's plugin discovery (lerobot.utils.import_utils.register_third_party_plugins)
+# reads the installed distribution's METADATA `Name:` field verbatim and requires the
+# `lerobot_policy_` prefix, then imports that exact string as a module. Hatchling
+# preserves the raw underscored name; setuptools would normalize it to dashes and
+# silently break discovery.
+[project]
+name = "lerobot_policy_pi05_drift"
+version = "0.1.0"
+description = "Pi0.5-Drift: one-step drifting-loss (DBPO) variant of Pi0.5, as a LeRobot plugin policy."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Xingdong Zuo" }]
+dependencies = [
+    # [pi] = PaliGemma/transformers runtime deps; [dataset] = datasets/torchcodec, without which
+    # lerobot-train cannot load LeRobotDataset. <0.7 because we import non-frozen lerobot internals.
+    "lerobot[pi,dataset]>=0.6.0,<0.7",
+]
+
+[project.urls]
+Homepage = "https://zuoxingdong.github.io/drift-vla/"
+Repository = "https://github.com/zuoxingdong/lerobot_policy_pi05_drift"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lerobot_policy_pi05_drift"]
