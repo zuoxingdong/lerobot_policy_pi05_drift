@@ -1,19 +1,36 @@
 # lerobot_policy_pi05_drift
 
+[![CI](https://github.com/zuoxingdong/lerobot_policy_pi05_drift/actions/workflows/ci.yml/badge.svg)](https://github.com/zuoxingdong/lerobot_policy_pi05_drift/actions/workflows/ci.yml)
+
 A [LeRobot](https://github.com/huggingface/lerobot) plugin policy for **Pi0.5-Drift**.
 
 Pi0.5 decodes an action chunk by integrating a flow-matching ODE, which takes 10 forward passes
 of the action expert per chunk. Pi0.5-Drift trains the same network with a one-step **Drifting**
 (DBPO) objective instead: a single forward pass maps noise directly to the chunk.
 
-- **96.6%** average success over the four LIBERO suites (Spatial / Object / Goal / Long)
-- **1 NFE** per chunk — **~3× faster** decode than 10-step flow matching at batch 1
-- **Backbone-robust**: with the VLM frozen (only the 300M expert trained), Drift holds **96.3%**
-  while flow matching drops to 85.7%
+- **96.3%** average success over the four LIBERO suites, vs 93.1% for 10-step flow matching
+  (**96.5%** with KeyStone)
+- **1 NFE** per chunk — **85.6 ms** vs 259.8 ms per chunk at batch 1 (**~3× faster**)
+- **Backbone-robust**: with the VLM frozen (only the 300M expert trained), Drift holds
+  **96.3%** on LIBERO-Spatial while flow matching drops to 85.7%
 - Same PaliGemma VLM + action expert as Pi0.5, byte-identical weight layout
 - Optional **KeyStone** test-time selection (K one-step candidates, ~zero added latency)
 
 Project website: <https://zuoxingdong.github.io/drift-vla/>
+
+## Results
+
+LIBERO success rates, 50 episodes/task × 3 eval seeds, closed-loop replanning (numbers from
+the [project page](https://zuoxingdong.github.io/drift-vla/)):
+
+| Policy | NFE | Spatial | Object | Goal | Long | Avg |
+|---|---:|---:|---:|---:|---:|---:|
+| **Pi0.5-Drift** | 1 | **98.3 ±0.3** | **98.1 ±0.9** | **95.6 ±0.8** | **93.1 ±0.6** | **96.3** |
+| Pi0.5 (flow matching) | 10 | 96.2 ±2.0 | 96.8 ±0.4 | 92.6 ±0.3 | 86.7 ±1.4 | 93.1 |
+
+KeyStone test-time selection lifts the Drift four-suite average to **96.5%**. Decode latency at
+batch 1: **85.6 ms/chunk** (Drift) vs 259.8 ms (10-step flow matching). Expert-only training
+(frozen VLM) on LIBERO-Spatial: Drift **96.3 ±0.5** vs flow matching 85.7 ±0.6.
 
 ## Install
 
@@ -62,7 +79,8 @@ lerobot-train \
   --steps=10000
 ```
 
-For the expert-only variant (frozen VLM, ~4× cheaper, same 96.3% four-suite average), set
+For the expert-only variant (frozen VLM, ~4× cheaper, 96.3 ±0.5 on LIBERO-Spatial where flow
+matching drops to 85.7 ±0.6), set
 `--policy.freeze_vision_encoder=true --policy.train_expert_only=true` and `--steps=6000`.
 
 ## Evaluate on LIBERO

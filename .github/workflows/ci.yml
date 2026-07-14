@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly canary: a fresh `pip install -e .` resolves the newest lerobot 0.6.x
+    # point release, so this catches upstream changes to the non-frozen internals
+    # this plugin imports even when the repo itself is untouched.
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      HF_HUB_DISABLE_TELEMETRY: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install FFmpeg (torchcodec runtime dependency)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Install CPU torch first (keeps the CUDA wheels out of the resolver)
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Install plugin (resolves lerobot)
+        run: pip install -e .
+      - name: Verify plugin loads through LeRobot
+        run: |
+          python - <<'EOF'
+          import importlib.metadata as md
+          import sys
+
+          # Discovery imports the METADATA `Name:` verbatim; it must stay underscored.
+          assert md.metadata("lerobot_policy_pi05_drift")["Name"] == "lerobot_policy_pi05_drift"
+
+          from lerobot.utils.import_utils import register_third_party_plugins
+          register_third_party_plugins()
+          assert "lerobot_policy_pi05_drift" in sys.modules, "auto-discovery did not import the plugin"
+
+          from lerobot.policies.factory import get_policy_class
+          assert get_policy_class("pi05_drift").__name__ == "PI05DriftPolicy"
+
+          import importlib
+          from lerobot_policy_pi05_drift import PI05DriftConfig
+          cfg = PI05DriftConfig()
+          assert cfg.type == "pi05_drift" and cfg.use_drifting_loss
+          assert cfg.drifting_gen_per_label == 8 and cfg.drifting_temperatures == (0.02, 0.05, 0.2)
+          proc = importlib.import_module(cfg.__class__.__module__.replace("configuration_", "processor_"))
+          assert callable(proc.make_pi05_drift_pre_post_processors)
+
+          # Drift loss + KeyStone selection are pure tensor math: run them.
+          import torch
+          from lerobot_policy_pi05_drift.drifting_util import drift_loss_grouped
+          from lerobot_policy_pi05_drift.keystone_util import cluster_medoid_select
+          torch.manual_seed(0)
+          gen = torch.randn(4, 3, 8, 10, requires_grad=True)
+          loss, _ = drift_loss_grouped(gen, torch.randn(4, 3, 1, 10))
+          assert loss.shape == (4, 3) and torch.isfinite(loss).all()
+          loss.sum().backward()
+          assert torch.isfinite(gen.grad).all()
+          cands = torch.cat([10 + 0.05 * torch.randn(6, 40), -10 + 0.05 * torch.randn(2, 40)]).unsqueeze(0)
+          idx, info = cluster_medoid_select(cands, num_clusters=2)
+          assert int(idx) < 6 and info["cluster_size"][0] == 6
+
+          print("OK: metadata, discovery, factory, processor, drift loss, KeyStone")
+          EOF
