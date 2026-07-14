@@ -25,7 +25,7 @@ cluster in flattened action space:
   2. unimodality guard: s = ||mean - global_medoid|| / (median_{i<j} Delta_ij + eps);
      s < tau -> the candidates are one compact cluster, return the GLOBAL medoid
      (k-means on a unimodal batch would split it into arbitrary halves);
-  3. otherwise k-means (C clusters, centroids initialized from C distinct random
+  3. otherwise k-means (C clusters, centroids initialized from the first C
      candidates, <= 10 iterations, early stop on stable assignments), then the
      medoid of the LARGEST cluster.
 
@@ -49,7 +49,6 @@ def cluster_medoid_select(
     candidates: Tensor,
     num_clusters: int = 2,
     unimodal_tau: float = 0.3,
-    generator: torch.Generator | None = None,
 ) -> tuple[Tensor, dict]:
     """Pick one candidate per batch element by guarded cluster-medoid selection.
 
@@ -58,8 +57,6 @@ def cluster_medoid_select(
             math runs in fp32). K == 1 degenerates to index 0 everywhere.
         num_clusters: C for the k-means stage (clamped to K).
         unimodal_tau: guard threshold; below it the global medoid is returned.
-        generator: optional torch.Generator for the k-means centroid init draw
-            (tests pin it for determinism; deployment leaves it None).
 
     Returns:
         (indices, info): indices [B] long -- the selected candidate per batch
@@ -94,7 +91,7 @@ def cluster_medoid_select(
             size_out.append(k)
             continue
         unimodal_out.append(False)
-        assign = _kmeans_assign(x[b], min(num_clusters, k), generator)
+        assign = _kmeans_assign(x[b], min(num_clusters, k))
         counts = torch.bincount(assign, minlength=int(assign.max()) + 1)
         members = (assign == int(counts.argmax())).nonzero(as_tuple=True)[0]
         # Medoid WITHIN the winning cluster, reusing the precomputed distances.
@@ -105,14 +102,17 @@ def cluster_medoid_select(
     return indices, {"spread": spread_out, "unimodal": unimodal_out, "cluster_size": size_out}
 
 
-def _kmeans_assign(x: Tensor, num_clusters: int, generator: torch.Generator | None) -> Tensor:
-    """Small k-means over [K, F]: centroids from C distinct random candidates,
-    <= 10 Lloyd iterations, early stop when assignments stabilize. Returns [K] long."""
-    k = x.shape[0]
-    # Draw the init permutation on CPU (torch.Generator defaults to CPU; a CUDA
-    # randperm with a CPU generator raises), then move the indices to x's device.
-    init = torch.randperm(k, generator=generator)[:num_clusters].to(x.device)
-    centroids = x[init].clone()
+def _kmeans_assign(x: Tensor, num_clusters: int) -> Tensor:
+    """Small k-means over [K, F]: centroids from the first C candidates,
+    <= 10 Lloyd iterations, early stop when assignments stabilize. Returns [K] long.
+
+    First-C init is deliberate: the candidates are iid draws (row order carries
+    no information), so a fixed index subset is distributionally identical to a
+    random one, selection stays a PURE function of its input, and no global RNG
+    is consumed (KeyStone on/off leaves the downstream RNG stream untouched).
+    Do not reintroduce a random init; do not sort/dedup candidates upstream.
+    """
+    centroids = x[:num_clusters].clone()
     assign: Tensor | None = None
     for _ in range(10):
         new_assign = torch.cdist(x, centroids).argmin(dim=1)
@@ -123,4 +123,7 @@ def _kmeans_assign(x: Tensor, num_clusters: int, generator: torch.Generator | No
             mask = assign == c
             if mask.any():  # empty cluster keeps its old centroid
                 centroids[c] = x[mask].mean(dim=0)
-    return assign
+    # Membership consistent with the FINAL centroids: a no-op when the loop
+    # early-stopped on stable assignments, half a Lloyd step of correction when
+    # it hit the iteration cap (otherwise `assign` is stale vs the last update).
+    return torch.cdist(x, centroids).argmin(dim=1)
