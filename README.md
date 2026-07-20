@@ -8,11 +8,12 @@ Pi0.5 decodes an action chunk by integrating a flow-matching ODE, which takes 10
 of the action expert per chunk. Pi0.5-Drift trains the same network with a one-step **Drifting**
 (DBPO) objective instead: a single forward pass maps noise directly to the chunk.
 
-- **96.3%** average success over the four LIBERO suites, vs 93.1% for 10-step flow matching
-  (**96.5%** with KeyStone)
+- **97.4%** average success over the four LIBERO suites, vs 96.9% for 10-step flow matching
+  (matched pair, 100k steps) — Drift ≥ FM at every training budget
+- **~3× more training-efficient**: reaches flow matching's 100k quality by ~30k steps
 - **1 NFE** per chunk — **85.6 ms** vs 259.8 ms per chunk at batch 1 (**~3× faster**)
-- **Backbone-robust**: with the VLM frozen (only the 300M expert trained), Drift holds
-  **96.3%** on LIBERO-Spatial while flow matching drops to 85.7%
+- **Backbone-robust**: with the VLM frozen (only the 300M expert trained), Drift holds a
+  **96.3%** four-suite average while flow matching drops to 85.7%
 - Same PaliGemma VLM + action expert as Pi0.5, byte-identical weight layout
 - Optional **KeyStone** test-time selection (K one-step candidates, ~zero added latency)
 
@@ -20,17 +21,22 @@ Project website: <https://zuoxingdong.github.io/drift-vla/>
 
 ## Results
 
-LIBERO success rates, 50 episodes/task × 3 eval seeds, closed-loop replanning (numbers from
-the [project page](https://zuoxingdong.github.io/drift-vla/)):
+LIBERO success rates, 50 episodes/task × 3 eval seeds, `n_action_steps=10`, official
+`lerobot-eval` on `lerobot==0.6.0`. Matched pair: identical recipe and 100k-step schedule, the
+training objective is the only difference. These are the released checkpoints
+([`pi05_drift_libero`](https://huggingface.co/zuoxingdong/pi05_drift_libero),
+[`pi05_fm_libero`](https://huggingface.co/zuoxingdong/pi05_fm_libero)).
 
 | Policy | NFE | Spatial | Object | Goal | Long | Avg |
 |---|---:|---:|---:|---:|---:|---:|
-| **Pi0.5-Drift** | 1 | **98.3 ±0.3** | **98.1 ±0.9** | **95.6 ±0.8** | **93.1 ±0.6** | **96.3** |
-| Pi0.5 (flow matching) | 10 | 96.2 ±2.0 | 96.8 ±0.4 | 92.6 ±0.3 | 86.7 ±1.4 | 93.1 |
+| **Pi0.5-Drift** | 1 | 97.9 ±1.0 | **99.0 ±0.2** | **98.1 ±0.4** | **94.7 ±1.9** | **97.4** |
+| Pi0.5 (flow matching) | 10 | **98.5 ±0.3** | 99.1 ±0.6 | 96.7 ±0.5 | 93.3 ±0.7 | 96.9 |
 
-KeyStone test-time selection lifts the Drift four-suite average to **96.5%**. Decode latency at
-batch 1: **85.6 ms/chunk** (Drift) vs 259.8 ms (10-step flow matching). Expert-only training
-(frozen VLM) on LIBERO-Spatial: Drift **96.3 ±0.5** vs flow matching 85.7 ±0.6.
+Drift ≥ FM at every budget of the training sweep — 25k / 50k / 75k / 100k:
+Drift 96.8 / 97.3 / **97.7** / 97.4 vs FM 96.2 / 95.9 / 96.7 / 96.9 (Drift peaks at 75k).
+KeyStone (K=8, C=2) nudges the four-suite average to **97.6** (libero_object +0.7, libero_10 +0.7).
+Decode latency at batch 1: **85.6 ms/chunk** (Drift) vs 259.8 ms (10-step flow matching).
+Expert-only training (frozen VLM): Drift **96.3** four-suite average vs 85.7 for flow matching.
 
 ## Install
 
@@ -79,8 +85,8 @@ lerobot-train \
   --steps=10000
 ```
 
-For the expert-only variant (frozen VLM, ~4× cheaper, 96.3 ±0.5 on LIBERO-Spatial where flow
-matching drops to 85.7 ±0.6), set
+For the expert-only variant (frozen VLM, ~4× cheaper, 96.3 four-suite average where flow
+matching drops to 85.7), set
 `--policy.freeze_vision_encoder=true --policy.train_expert_only=true` and `--steps=6000`.
 
 ## Evaluate on LIBERO
@@ -91,7 +97,7 @@ task, `n_action_steps=10`, seeds {1000, 1001, 1002}; e.g. for `libero_10` (Long)
 ```bash
 for task_id in 0 1 2 3 4 5 6 7 8 9; do
   lerobot-eval \
-    --policy.path=<checkpoint-path-or-hub-id> \
+    --policy.path=zuoxingdong/pi05_drift_libero \
     --policy.n_action_steps=10 \
     --env.type=libero \
     --env.task=libero_10 \
@@ -118,8 +124,11 @@ KeyStone test-time selection is an eval-time flag set (helps checkpoints with
 selection-recoverable failures; ~zero added latency):
 
 ```bash
-  --policy.test_time_samples=8 --policy.test_time_clusters=4 --policy.test_time_unimodal_tau=0.3
+  --policy.test_time_samples=8 --policy.test_time_clusters=2 --policy.test_time_unimodal_tau=0.3
 ```
+
+On a fully-annealed checkpoint this is a per-suite knob (measured +0.7 on libero_object and
+libero_10, −1.0 on libero_goal); larger `test_time_clusters` hurts at ceiling.
 
 ## Use from Python
 
@@ -127,7 +136,7 @@ selection-recoverable failures; ~zero added latency):
 import lerobot_policy_pi05_drift              # registers "pi05_drift" — import before loading
 from lerobot.policies.factory import get_policy_class
 
-policy = get_policy_class("pi05_drift").from_pretrained("<checkpoint-path-or-hub-id>")
+policy = get_policy_class("pi05_drift").from_pretrained("zuoxingdong/pi05_drift_libero")
 action = policy.select_action(batch)          # (B, action_dim); 1-NFE drift inference
 ```
 
